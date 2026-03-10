@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+praw
+vaderSentiment
+transformers
+sqlalchemy
+psycopg2-binary
+apscheduler
+python-dotenv
+torch
+pandas
