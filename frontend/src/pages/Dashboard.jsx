@@ -1,11 +1,28 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   AreaChart, Area, BarChart, Bar, RadarChart, Radar,
   PolarGrid, PolarAngleAxis, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, PieChart, Pie, Cell,
 } from "recharts";
+import { fetchIITSentiment, fetchAllIITs, getWeeklySummary } from "../api";
 
-// ─── DATA ────────────────────────────────────────────────────────────────────
+const IIT_COLORS = {
+  "IITB":   { color: "#f97316", accent: "#fb923c", short: "IITB", full: "IIT Bombay" },
+  "IITM":   { color: "#0ea5e9", accent: "#38bdf8", short: "IITM", full: "IIT Madras" },
+  "IITP":   { color: "#a855f7", accent: "#c084fc", short: "IITP", full: "IIT Patna" },
+  "IITD":   { color: "#10b981", accent: "#34d399", short: "IITD", full: "IIT Delhi" },
+  "IITKgp": { color: "#f43f5e", accent: "#fb7185", short: "IITKgp", full: "IIT Kharagpur" },
+  "IITBHU": { color: "#eab308", accent: "#facc15", short: "IITBHU", full: "IIT BHU" },
+  "IITG":   { color: "#06b6d4", accent: "#22d3ee", short: "IITG", full: "IIT Guwahati" },
+};
+
+const LOCATIONS = {
+  "IITB": "Mumbai, Maharashtra", "IITM": "Chennai, Tamil Nadu",
+  "IITP": "Patna, Bihar", "IITD": "New Delhi",
+  "IITKgp": "Kharagpur, West Bengal", "IITBHU": "Varanasi, Uttar Pradesh",
+  "IITG": "Guwahati, Assam",
+};
+
 const IIT_DATA = {
   "IIT Bombay": {
     short: "IITB", location: "Mumbai, Maharashtra", color: "#f97316",
@@ -232,8 +249,27 @@ export default function Dashboard() {
   const [active, setActive] = useState("IIT Bombay");
   const [tab,    setTab]    = useState("overview");
   const [fade,   setFade]   = useState(true);
+  const [liveData, setLiveData] = useState({});
+  const [loading, setLoading] = useState(false);
 
-  const d = IIT_DATA[active];
+  const baseD = IIT_DATA[active];
+
+  useEffect(() => {
+    const loadLiveData = async () => {
+      setLoading(true);
+      try {
+        const iitKey = IIT_DATA[active]?.short;
+        if (iitKey) {
+          const data = await fetchIITSentiment(iitKey);
+          setLiveData(prev => ({ ...prev, [iitKey]: data }));
+        }
+      } catch (err) {
+        console.warn("Using static data - API not available:", err.message);
+      }
+      setLoading(false);
+    };
+    loadLiveData();
+  }, [active]);
 
   const switchIIT = (name) => {
     if (name === active) return;
@@ -241,10 +277,66 @@ export default function Dashboard() {
     setTimeout(() => { setActive(name); setTab("overview"); setFade(true); }, 180);
   };
 
+  const iitKey = baseD?.short;
+  const apiData = liveData[iitKey];
+
+  // Merge live API data if available
+  const overallScore = apiData ? apiData.overall : baseD.overall;
+  const postCount = apiData ? apiData.total_posts : baseD.posts;
+  
+  // Map categories
+  const categoriesList = baseD.categories.map(c => {
+    if (apiData && apiData.categories) {
+      const match = apiData.categories.find(ac => ac.name.toLowerCase() === c.name.toLowerCase());
+      if (match) {
+        return { ...c, score: match.score, posts: match.posts };
+      }
+    }
+    return c;
+  });
+
+  // Map top posts
+  const topPostsList = apiData && apiData.top_posts ? apiData.top_posts.map(p => ({
+    text: p.title,
+    label: p.label,
+    compound: p.compound,
+    subreddit: p.subreddit,
+    score: p.score,
+    comments: p.comments
+  })) : baseD.topPosts;
+
+  // Calculate live pie data based on live posts
+  let positivePercent = 0, negativePercent = 0, neutralPercent = 0;
+  if (apiData && apiData.top_posts && apiData.top_posts.length > 0) {
+    let positiveCount = 0, negativeCount = 0, neutralCount = 0;
+    apiData.top_posts.forEach(p => {
+      if (p.label === "positive") positiveCount++;
+      else if (p.label === "negative") negativeCount++;
+      else neutralCount++;
+    });
+    const total = apiData.top_posts.length;
+    positivePercent = Math.round((positiveCount / total) * 100);
+    negativePercent = Math.round((negativeCount / total) * 100);
+    neutralPercent = 100 - positivePercent - negativePercent;
+  } else {
+    positivePercent = baseD.timeline[5].pos;
+    negativePercent = baseD.timeline[5].neg;
+    neutralPercent = baseD.timeline[5].neu;
+  }
+
+  // Construct the merged 'd' object used throughout the JSX template
+  const d = {
+    ...baseD,
+    overall: overallScore,
+    posts: postCount,
+    categories: categoriesList,
+    topPosts: topPostsList
+  };
+
   const pieData = [
-    { name: "Positive", value: d.timeline[5].pos, color: "#10b981" },
-    { name: "Neutral",  value: d.timeline[5].neu, color: "#4b5563" },
-    { name: "Negative", value: d.timeline[5].neg, color: "#ef4444" },
+    { name: "Positive", value: positivePercent, color: "#10b981" },
+    { name: "Neutral",  value: neutralPercent,  color: "#4b5563" },
+    { name: "Negative", value: negativePercent, color: "#ef4444" },
   ];
 
   const radarData = d.categories.map(c => ({ subject: c.name, A: c.score, fullMark: 100 }));
@@ -252,210 +344,342 @@ export default function Dashboard() {
   // ── styles ──
   const S = {
     page: {
-      display:"flex", flexDirection:"column",
-      minHeight:"100vh", background:"#0d1117", color:"#c9d1d9",
-      fontFamily:"'IBM Plex Mono','Courier New',monospace",
+      display: "flex",
+      flexDirection: "column",
+      minHeight: "calc(100vh - 73px)",
+      background: "#0d1117",
+      color: "#c9d1d9",
+      fontFamily: "'Inter', sans-serif",
     },
-    header: {
-      background:"linear-gradient(90deg,#161b22 0%,#0d1117 100%)",
-      borderBottom:"1px solid #21262d",
-      padding:"14px 28px",
-      display:"flex", alignItems:"center", justifyContent:"space-between",
-      position:"sticky", top:0, zIndex:100,
+    body: {
+      display: "flex",
+      flex: 1,
+      overflow: "hidden"
     },
-    logo: { display:"flex", alignItems:"center", gap:14 },
-    logoIcon: (color, accent) => ({
-      width:44, height:44, borderRadius:8,
-      background:`linear-gradient(135deg,${color},${accent})`,
-      display:"flex", alignItems:"center", justifyContent:"center",
-      fontSize:20, boxShadow:`0 0 20px ${color}44`, transition:"background 0.4s",
-    }),
-    body: { display:"flex", flex:1, overflow:"hidden" },
     sidebar: {
-      width:220, background:"#161b22", borderRight:"1px solid #21262d",
-      display:"flex", flexDirection:"column", overflowY:"auto", flexShrink:0,
+      width: "230px",
+      background: "#161b22",
+      borderRight: "1px solid #21262d",
+      display: "flex",
+      flexDirection: "column",
+      overflowY: "auto",
+      flexShrink: 0,
     },
     main: {
-      flex:1, overflowY:"auto", padding:"20px 24px",
-      opacity: fade ? 1 : 0, transition:"opacity 0.18s",
+      flex: 1,
+      overflowY: "auto",
+      padding: "24px",
+      opacity: fade ? 1 : 0,
+      transition: "opacity 0.18s",
     },
     card: {
-      background:"#161b22", border:"1px solid #21262d",
-      borderRadius:10, padding:16,
+      background: "rgba(22, 27, 34, 0.75)",
+      backdropFilter: "blur(12px)",
+      border: "1px solid #21262d",
+      borderRadius: "12px",
+      padding: "18px",
+      boxShadow: "0 4px 20px rgba(0, 0, 0, 0.2)",
+      transition: "all 0.25s ease-in-out"
     },
     sectionLabel: {
-      fontSize:10, color:"#484f58", letterSpacing:"2px",
-      marginBottom:14, fontFamily:"monospace",
+      fontSize: "10px",
+      color: "#8b949e",
+      fontWeight: 700,
+      letterSpacing: "1.5px",
+      marginBottom: "14px",
+      fontFamily: "'IBM Plex Mono', monospace",
+      textTransform: "uppercase"
     },
     tabBar: {
-      display:"flex", gap:2, marginBottom:20,
-      background:"#161b22", borderRadius:8, padding:4,
-      width:"fit-content", border:"1px solid #21262d",
+      display: "flex",
+      gap: "4px",
+      marginBottom: "20px",
+      background: "rgba(22, 27, 34, 0.5)",
+      borderRadius: "8px",
+      padding: "4px",
+      width: "fit-content",
+      border: "1px solid #21262d",
     },
   };
 
   return (
     <div style={S.page}>
-      {/* ── HEADER ── */}
-      <div style={S.header}>
-        <div style={S.logo}>
-          <div style={S.logoIcon(d.color, d.accent)}>⚡</div>
-          <div>
-            <span style={{ fontSize:18, fontWeight:700, color:"#f0f6fc" }}>UniPulse</span>
-            <span style={{ fontSize:18, fontWeight:300, color:d.color, marginLeft:6, transition:"color 0.4s" }}> AI</span>
-            <div style={{ fontSize:10, color:"#484f58", letterSpacing:"3px", marginTop:1 }}>IIT INTELLIGENCE PLATFORM</div>
-          </div>
-        </div>
-        <div style={{ display:"flex", gap:20, alignItems:"center" }}>
-          <div style={{ textAlign:"right" }}>
-            <div style={{ fontSize:10, color:"#484f58" }}>LIVE SOURCE</div>
-            <div style={{ fontSize:11, color:"#58a6ff" }}>Reddit API • PRAW</div>
-          </div>
-          <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-            <div style={{ width:7, height:7, borderRadius:"50%", background:"#10b981", boxShadow:"0 0 6px #10b981" }} />
-            <span style={{ fontSize:11, color:"#484f58" }}>LIVE</span>
-          </div>
-        </div>
-      </div>
-
       <div style={S.body}>
         {/* ── SIDEBAR ── */}
         <div style={S.sidebar}>
-          <div style={{ padding:"14px 16px 8px", fontSize:9, color:"#484f58", letterSpacing:"2px" }}>SELECT IIT</div>
+          <div style={{
+            padding: "16px 16px 8px",
+            fontSize: "9px",
+            color: "#8b949e",
+            fontWeight: 800,
+            letterSpacing: "1.8px",
+            fontFamily: "'IBM Plex Mono', monospace"
+          }}>SELECT INSTITUTE</div>
 
-          {IIT_LIST.map((name) => {
-            const inst = IIT_DATA[name];
-            const isActive = name === active;
-            const sc = getColor(inst.overall);
-            return (
-              <div key={name} onClick={() => switchIIT(name)} style={{
-                padding:"12px 16px", cursor:"pointer",
-                borderLeft: isActive ? `3px solid ${inst.color}` : "3px solid transparent",
-                background: isActive ? `${inst.color}12` : "transparent",
-                transition:"all 0.15s", borderBottom:"1px solid #21262d",
-              }}>
-                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                  <span style={{ fontSize:13, fontWeight: isActive ? 700 : 400, color: isActive ? inst.color : "#8b949e", transition:"color 0.2s" }}>
-                    {inst.short}
-                  </span>
-                  <span style={{ fontSize:11, fontWeight:700, padding:"1px 7px", borderRadius:4, background:`${sc}20`, color:sc }}>
-                    {inst.overall}
-                  </span>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {IIT_LIST.map((name) => {
+              const inst = IIT_DATA[name];
+              const isActive = name === active;
+              const sc = getColor(inst.overall);
+              return (
+                <div
+                  key={name}
+                  onClick={() => switchIIT(name)}
+                  style={{
+                    padding: "14px 18px",
+                    cursor: "pointer",
+                    borderLeft: isActive ? `3px solid ${inst.color}` : "3px solid transparent",
+                    background: isActive ? `${inst.color}08` : "transparent",
+                    borderBottom: "1px solid #21262d",
+                    transition: "all 0.2s"
+                  }}
+                  className="sidebar-item"
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{
+                      fontSize: "12px",
+                      fontWeight: isActive ? 700 : 500,
+                      color: isActive ? inst.color : "#c9d1d9",
+                      fontFamily: "'IBM Plex Mono', monospace"
+                    }}>
+                      {inst.short}
+                    </span>
+                    <span style={{
+                      fontSize: "10px",
+                      fontWeight: 700,
+                      padding: "2px 7px",
+                      borderRadius: "4px",
+                      background: `${sc}18`,
+                      color: sc,
+                      fontFamily: "'IBM Plex Mono', monospace"
+                    }}>
+                      {inst.overall}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: "10px", color: "#8b949e", marginTop: "3px" }}>{inst.location}</div>
+                  <div style={{ marginTop: "8px", height: "3px", borderRadius: "1.5px", background: "#21262d" }}>
+                    <div style={{ height: "100%", width: `${inst.overall}%`, background: inst.color, borderRadius: "1.5px", transition: "width 0.5s" }} />
+                  </div>
                 </div>
-                <div style={{ fontSize:9, color:"#484f58", marginTop:3 }}>{inst.location}</div>
-                <div style={{ marginTop:6, height:2, borderRadius:1, background:"#21262d" }}>
-                  <div style={{ height:"100%", width:`${inst.overall}%`, background:inst.color, borderRadius:1, transition:"width 0.5s" }} />
-                </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
 
           {/* Rankings */}
-          <div style={{ padding:"16px", marginTop:"auto", borderTop:"1px solid #21262d" }}>
-            <div style={{ fontSize:9, color:"#484f58", letterSpacing:"2px", marginBottom:10 }}>OVERALL RANKING</div>
+          <div style={{ padding: "16px", marginTop: "auto", borderTop: "1px solid #21262d" }}>
+            <div style={{
+              fontSize: "9px",
+              color: "#8b949e",
+              fontWeight: 800,
+              letterSpacing: "1.5px",
+              marginBottom: "12px",
+              fontFamily: "'IBM Plex Mono', monospace"
+            }}>OVERALL RANKING</div>
             {RANK_ORDER.map((name, i) => {
               const inst = IIT_DATA[name];
               return (
-                <div key={name} onClick={() => switchIIT(name)}
-                  style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6, cursor:"pointer" }}>
-                  <span style={{ fontSize:9, color:"#484f58", width:12 }}>#{i+1}</span>
-                  <span style={{ fontSize:11, color: name === active ? inst.color : "#6e7681", width:52 }}>{inst.short}</span>
-                  <div style={{ flex:1, height:2, background:"#21262d", borderRadius:1 }}>
-                    <div style={{ height:"100%", width:`${inst.overall}%`, background:inst.color, borderRadius:1 }} />
+                <div
+                  key={name}
+                  onClick={() => switchIIT(name)}
+                  style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", cursor: "pointer" }}
+                >
+                  <span style={{ fontSize: "9px", color: "#8b949e", width: "14px", fontFamily: "'IBM Plex Mono', monospace" }}>#{i+1}</span>
+                  <span style={{ fontSize: "11px", color: name === active ? inst.color : "#8b949e", width: "52px", fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace" }}>{inst.short}</span>
+                  <div style={{ flex: 1, height: "2px", background: "#21262d", borderRadius: "1px" }}>
+                    <div style={{ height: "100%", width: `${inst.overall}%`, background: inst.color, borderRadius: "1px" }} />
                   </div>
-                  <span style={{ fontSize:10, color:getColor(inst.overall), fontWeight:700, width:24, textAlign:"right" }}>{inst.overall}</span>
+                  <span style={{ fontSize: "10px", color: getColor(inst.overall), fontWeight: 700, width: "24px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace" }}>{inst.overall}</span>
                 </div>
               );
             })}
           </div>
         </div>
 
-        {/* ── MAIN ── */}
+        {/* ── MAIN CONTENT ── */}
         <div style={S.main}>
+          {/* Sub-Telemetry Status Bar */}
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            padding: "8px 14px",
+            background: "rgba(22, 27, 34, 0.4)",
+            border: "1px solid #21262d",
+            borderRadius: "8px",
+            marginBottom: "16px",
+            fontSize: "10px",
+            fontFamily: "'IBM Plex Mono', monospace",
+            color: "#8b949e"
+          }}>
+            <div style={{ display: "flex", gap: "16px" }}>
+              <span>SYSTEM: <span style={{ color: "#f0f6fc", fontWeight: 600 }}>ONLINE</span></span>
+              <span>LIVE FEED: <span style={{ color: apiData ? "#10b981" : "#f59e0b" }}>{apiData ? "ACTIVE" : "DEMO"}</span></span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <div style={{
+                width: "6px",
+                height: "6px",
+                borderRadius: "50%",
+                background: apiData ? "#10b981" : "#f59e0b",
+                boxShadow: `0 0 8px ${apiData ? "#10b981" : "#f59e0b"}`
+              }} />
+              <span>SOURCE: {apiData ? "REDDIT API" : "STATIC SIMULATOR"}</span>
+            </div>
+          </div>
 
           {/* Institute banner */}
           <div style={{
-            background:`linear-gradient(135deg,#161b22,${d.color}18)`,
-            border:`1px solid ${d.color}40`, borderRadius:12,
-            padding:"18px 22px", marginBottom:20,
-            display:"flex", alignItems:"center", justifyContent:"space-between",
+            background: `linear-gradient(135deg, rgba(22, 27, 34, 0.8), ${d.color}15)`,
+            border: `1px solid ${d.color}45`,
+            borderRadius: "12px",
+            padding: "20px 24px",
+            marginBottom: "20px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            boxShadow: `0 8px 32px rgba(0, 0, 0, 0.25), 0 0 15px ${d.color}08`,
+            backdropFilter: "blur(12px)"
           }}>
             <div>
-              <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
-                <span style={{ fontSize:22, fontWeight:800, color:d.color, letterSpacing:"-1px" }}>{active}</span>
-                <span style={{ fontSize:10, padding:"3px 8px", borderRadius:4, background:`${getColor(d.overall)}20`, color:getColor(d.overall), fontWeight:700, letterSpacing:"1px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+                <span style={{ fontSize: "22px", fontWeight: 800, color: d.color, letterSpacing: "-0.5px" }}>{active}</span>
+                <span style={{
+                  fontSize: "9px",
+                  padding: "3px 8px",
+                  borderRadius: "4px",
+                  background: `${getColor(d.overall)}18`,
+                  color: getColor(d.overall),
+                  fontWeight: 700,
+                  letterSpacing: "1px",
+                  fontFamily: "'IBM Plex Mono', monospace"
+                }}>
                   {getLabel(d.overall)}
                 </span>
-                <span style={{ fontSize:12, color: d.trend==="up" ? "#10b981" : d.trend==="down" ? "#ef4444" : "#f59e0b" }}>
-                  {d.trend==="up" ? "▲ trending up" : d.trend==="down" ? "▼ declining" : "→ stable"}
+                <span style={{
+                  fontSize: "11px",
+                  fontWeight: 600,
+                  color: d.trend === "up" ? "#10b981" : d.trend === "down" ? "#ef4444" : "#f59e0b"
+                }}>
+                  {d.trend === "up" ? "▲ TELEM UP" : d.trend === "down" ? "▼ DECLINING" : "→ STEADY"}
                 </span>
               </div>
-              <div style={{ fontSize:11, color:"#484f58", marginTop:4 }}>
+              <div style={{ fontSize: "11px", color: "#8b949e", marginTop: "6px" }}>
                 📍 {d.location} &nbsp;|&nbsp; Founded {d.founded} &nbsp;|&nbsp; {d.sub} &nbsp;|&nbsp; ~{d.students.toLocaleString()} students
               </div>
             </div>
-            <div style={{ textAlign:"right", flexShrink:0 }}>
-              <div style={{ fontSize:40, fontWeight:900, color:d.color, letterSpacing:"-2px", lineHeight:1 }}>{d.overall}</div>
-              <div style={{ fontSize:9, color:"#484f58", letterSpacing:"2px" }}>SENTIMENT SCORE</div>
-              <div style={{ fontSize:10, color:"#484f58", marginTop:3 }}>{d.posts.toLocaleString()} posts • 30 days</div>
+            
+            <div style={{ textAlign: "right", flexShrink: 0 }}>
+              <div style={{
+                fontSize: "38px",
+                fontWeight: 900,
+                color: d.color,
+                letterSpacing: "-2px",
+                lineHeight: 1,
+                fontFamily: "'IBM Plex Mono', monospace",
+                textShadow: `0 0 15px ${d.color}25`
+              }}>{d.overall}</div>
+              <div style={{
+                fontSize: "8px",
+                color: "#8b949e",
+                letterSpacing: "1.8px",
+                fontWeight: 700,
+                marginTop: "4px",
+                fontFamily: "'IBM Plex Mono', monospace"
+              }}>SENTIMENT SCORE</div>
+              <div style={{ fontSize: "10px", color: "#8b949e", marginTop: "4px", fontFamily: "'IBM Plex Mono', monospace" }}>
+                {d.posts.toLocaleString()} posts • 30 days
+              </div>
             </div>
           </div>
 
           {/* Tab bar */}
           <div style={S.tabBar}>
-            {["overview","trends","categories","feed"].map(t => (
-              <button key={t} onClick={() => setTab(t)} style={{
-                padding:"7px 16px", borderRadius:6, border:"none",
-                background: tab===t ? d.color : "transparent",
-                color: tab===t ? "#000" : "#484f58",
-                fontWeight: tab===t ? 700 : 400,
-                fontSize:11, cursor:"pointer", letterSpacing:"0.5px",
-                textTransform:"uppercase", transition:"all 0.2s",
-                fontFamily:"inherit",
-              }}>{t}</button>
-            ))}
+            {["overview", "trends", "categories", "feed"].map(t => {
+              const activeTab = tab === t;
+              return (
+                <button
+                  key={t}
+                  onClick={() => setTab(t)}
+                  style={{
+                    padding: "7px 16px",
+                    borderRadius: "6px",
+                    border: "none",
+                    background: activeTab ? d.color : "transparent",
+                    color: activeTab ? "#000" : "#8b949e",
+                    fontWeight: 700,
+                    fontSize: "10px",
+                    cursor: "pointer",
+                    letterSpacing: "0.8px",
+                    textTransform: "uppercase",
+                    transition: "all 0.2s",
+                    fontFamily: "'IBM Plex Mono', monospace",
+                  }}
+                  className={`tab-btn ${activeTab ? 'active' : ''}`}
+                >{t}</button>
+              );
+            })}
           </div>
 
           {/* ══ OVERVIEW ══ */}
           {tab === "overview" && (
             <>
               {/* KPI row */}
-              <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginBottom:20 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: "16px", marginBottom: "20px" }}>
                 {[
-                  { label:"Posts Analyzed",    val: d.posts.toLocaleString(),                                                    icon:"📊", sub:"last 30 days",                                                      col: d.color },
-                  { label:"Positive Sentiment",val:`${d.timeline[5].pos}%`,                                                      icon:"✅", sub:"current week",                                                     col:"#10b981" },
-                  { label:"Negative Sentiment",val:`${d.timeline[5].neg}%`,                                                      icon:"⚠️", sub:"current week",                                                     col:"#ef4444" },
-                  { label:"Top Category",      val:[...d.categories].sort((a,b)=>b.score-a.score)[0].name, icon:"🏆",
-                    sub:`Score: ${[...d.categories].sort((a,b)=>b.score-a.score)[0].score}%`,              col:"#f59e0b" },
-                ].map((k,i) => (
-                  <div key={i} style={{ ...S.card, borderTop:`3px solid ${k.col}` }}>
-                    <div style={{ fontSize:18, marginBottom:8 }}>{k.icon}</div>
-                    <div style={{ fontSize:20, fontWeight:800, color:k.col, letterSpacing:"-1px" }}>{k.val}</div>
-                    <div style={{ fontSize:10, color:"#484f58", marginTop:3 }}>{k.label}</div>
-                    <div style={{ fontSize:9,  color:"#484f58", marginTop:2,  letterSpacing:"0.5px" }}>{k.sub}</div>
+                  { label: "Posts Analyzed", val: d.posts.toLocaleString(), icon: "📊", sub: "last 30 days", col: d.color },
+                  { label: "Positive Sentiment", val: `${d.timeline[5].pos}%`, icon: "✅", sub: "current week", col: "#10b981" },
+                  { label: "Negative Sentiment", val: `${d.timeline[5].neg}%`, icon: "⚠️", sub: "current week", col: "#ef4444" },
+                  { label: "Top Category", val: [...d.categories].sort((a, b) => b.score - a.score)[0].name, icon: "🏆", sub: `Score: ${[...d.categories].sort((a, b) => b.score - a.score)[0].score}%`, col: "#f59e0b" },
+                ].map((k, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      ...S.card,
+                      border: "1px solid #21262d",
+                      borderLeft: `4px solid ${k.col}`,
+                      display: "flex",
+                      flexDirection: "column",
+                      justifyContent: "space-between"
+                    }}
+                    className="kpi-card"
+                  >
+                    <div>
+                      <div style={{ fontSize: "16px", marginBottom: "8px" }}>{k.icon}</div>
+                      <div style={{
+                        fontSize: "20px",
+                        fontWeight: 800,
+                        color: k.col,
+                        letterSpacing: "-0.5px",
+                        fontFamily: "'IBM Plex Mono', monospace"
+                      }}>{k.val}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: "10px", color: "#8b949e", fontWeight: 700, marginTop: "6px" }}>{k.label}</div>
+                      <div style={{ fontSize: "9px", color: "#8b949e", marginTop: "2px", fontFamily: "'IBM Plex Mono', monospace" }}>{k.sub}</div>
+                    </div>
                   </div>
                 ))}
               </div>
 
               {/* Area + Donut */}
-              <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr", gap:16, marginBottom:16 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "16px", marginBottom: "16px" }}>
                 <div style={S.card}>
                   <div style={S.sectionLabel}>6-WEEK SENTIMENT TREND</div>
                   <ResponsiveContainer width="100%" height={180}>
                     <AreaChart data={d.timeline}>
                       <defs>
                         <linearGradient id="gPos" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%"  stopColor="#10b981" stopOpacity={0.3} />
-                          <stop offset="95%" stopColor="#10b981" stopOpacity={0}   />
+                          <stop offset="5%" stopColor="#10b981" stopOpacity={0.25} />
+                          <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
                         </linearGradient>
                         <linearGradient id="gNeg" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%"  stopColor="#ef4444" stopOpacity={0.25} />
-                          <stop offset="95%" stopColor="#ef4444" stopOpacity={0}    />
+                          <stop offset="5%" stopColor="#ef4444" stopOpacity={0.2} />
+                          <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
                         </linearGradient>
                       </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
-                      <XAxis dataKey="week" stroke="#484f58" fontSize={10} />
-                      <YAxis stroke="#484f58" fontSize={10} />
+                      <CartesianGrid strokeDasharray="3 3" stroke="#21262d" opacity={0.4} />
+                      <XAxis dataKey="week" stroke="#8b949e" fontSize={9} fontFamily="'IBM Plex Mono', monospace" />
+                      <YAxis stroke="#8b949e" fontSize={9} fontFamily="'IBM Plex Mono', monospace" />
                       <Tooltip content={<CustomTooltip />} />
                       <Area type="monotone" dataKey="pos" name="Positive" stroke="#10b981" strokeWidth={2} fill="url(#gPos)" />
                       <Area type="monotone" dataKey="neg" name="Negative" stroke="#ef4444" strokeWidth={2} fill="url(#gNeg)" />
@@ -465,27 +689,27 @@ export default function Dashboard() {
 
                 <div style={S.card}>
                   <div style={S.sectionLabel}>CURRENT MIX</div>
-                  <div style={{ display:"flex", justifyContent:"center", position:"relative" }}>
-                    <ResponsiveContainer width={140} height={140}>
+                  <div style={{ display: "flex", justifyContent: "center", position: "relative" }}>
+                    <ResponsiveContainer width={130} height={130}>
                       <PieChart>
-                        <Pie data={pieData} cx="50%" cy="50%" innerRadius={42} outerRadius={65} dataKey="value" strokeWidth={0}>
-                          {pieData.map((e,i) => <Cell key={i} fill={e.color} />)}
+                        <Pie data={pieData} cx="50%" cy="50%" innerRadius={38} outerRadius={55} dataKey="value" strokeWidth={0}>
+                          {pieData.map((e, i) => <Cell key={i} fill={e.color} />)}
                         </Pie>
                       </PieChart>
                     </ResponsiveContainer>
-                    <div style={{ position:"absolute", top:"50%", left:"50%", transform:"translate(-50%,-50%)", textAlign:"center" }}>
-                      <div style={{ fontSize:24, fontWeight:900, color:d.color }}>{d.overall}</div>
-                      <div style={{ fontSize:8,  color:"#484f58" }}>SCORE</div>
+                    <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", textAlign: "center" }}>
+                      <div style={{ fontSize: "20px", fontWeight: 800, color: d.color, fontFamily: "'IBM Plex Mono', monospace" }}>{d.overall}</div>
+                      <div style={{ fontSize: "8px", color: "#8b949e", fontWeight: 700, fontFamily: "'IBM Plex Mono', monospace" }}>SCORE</div>
                     </div>
                   </div>
-                  <div style={{ marginTop:12 }}>
+                  <div style={{ marginTop: "12px" }}>
                     {pieData.map(p => (
-                      <div key={p.name} style={{ display:"flex", justifyContent:"space-between", marginBottom:5, fontSize:11 }}>
-                        <div style={{ display:"flex", alignItems:"center", gap:6, color:"#8b949e" }}>
-                          <div style={{ width:8, height:8, borderRadius:2, background:p.color }} />
+                      <div key={p.name} style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px", fontSize: "11px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "#8b949e" }}>
+                          <div style={{ width: "8px", height: "8px", borderRadius: "2px", background: p.color }} />
                           {p.name}
                         </div>
-                        <span style={{ color:p.color, fontWeight:700 }}>{p.value}%</span>
+                        <span style={{ color: p.color, fontWeight: 700, fontFamily: "'IBM Plex Mono', monospace" }}>{p.value}%</span>
                       </div>
                     ))}
                   </div>
@@ -495,15 +719,15 @@ export default function Dashboard() {
               {/* Category snapshot */}
               <div style={S.card}>
                 <div style={S.sectionLabel}>CATEGORY SNAPSHOT</div>
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:"8px 24px" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: "10px 24px" }}>
                   {d.categories.map(cat => (
                     <div key={cat.name}>
-                      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4, fontSize:11 }}>
-                        <span style={{ color:"#8b949e" }}>{cat.icon} {cat.name}</span>
-                        <span style={{ color:getColor(cat.score), fontWeight:700 }}>{cat.score}%</span>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px", fontSize: "11px" }}>
+                        <span style={{ color: "#c9d1d9", fontSize: "11px" }}>{cat.icon} {cat.name}</span>
+                        <span style={{ color: getColor(cat.score), fontWeight: 700, fontFamily: "'IBM Plex Mono', monospace" }}>{cat.score}%</span>
                       </div>
-                      <div style={{ height:4, borderRadius:2, background:"#21262d" }}>
-                        <div style={{ height:"100%", width:`${cat.score}%`, borderRadius:2, background:getColor(cat.score), transition:"width 0.7s ease" }} />
+                      <div style={{ height: "4px", borderRadius: "2px", background: "#21262d" }}>
+                        <div style={{ height: "100%", width: `${cat.score}%`, borderRadius: "2px", background: getColor(cat.score), transition: "width 0.7s ease" }} />
                       </div>
                     </div>
                   ))}
@@ -514,42 +738,49 @@ export default function Dashboard() {
 
           {/* ══ TRENDS ══ */}
           {tab === "trends" && (
-            <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
               <div style={S.card}>
                 <div style={S.sectionLabel}>WEEKLY SENTIMENT BREAKDOWN</div>
                 <ResponsiveContainer width="100%" height={240}>
                   <BarChart data={d.timeline} barGap={2}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
-                    <XAxis dataKey="week" stroke="#484f58" fontSize={11} />
-                    <YAxis stroke="#484f58" fontSize={11} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="#21262d" opacity={0.4} />
+                    <XAxis dataKey="week" stroke="#8b949e" fontSize={10} fontFamily="'IBM Plex Mono', monospace" />
+                    <YAxis stroke="#8b949e" fontSize={10} fontFamily="'IBM Plex Mono', monospace" />
                     <Tooltip content={<CustomTooltip />} />
-                    <Bar dataKey="pos" name="Positive" fill="#10b981" radius={[3,3,0,0]} />
-                    <Bar dataKey="neu" name="Neutral"  fill="#4b5563" radius={[3,3,0,0]} />
-                    <Bar dataKey="neg" name="Negative" fill="#ef4444" radius={[3,3,0,0]} />
+                    <Bar dataKey="pos" name="Positive" fill="#10b981" radius={[3, 3, 0, 0]} />
+                    <Bar dataKey="neu" name="Neutral" fill="#4b5563" radius={[3, 3, 0, 0]} />
+                    <Bar dataKey="neg" name="Negative" fill="#ef4444" radius={[3, 3, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
 
               <div style={S.card}>
                 <div style={S.sectionLabel}>ALL IITs COMPARISON</div>
-                <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                   {RANK_ORDER.map((name, i) => {
                     const inst = IIT_DATA[name];
+                    const isSelf = name === active;
                     return (
-                      <div key={name} onClick={() => switchIIT(name)} style={{
-                        cursor:"pointer", padding:"10px 14px", borderRadius:8,
-                        background: name===active ? `${inst.color}12` : "#0d1117",
-                        border:`1px solid ${name===active ? inst.color+"50" : "#21262d"}`,
-                        transition:"all 0.15s",
-                      }}>
-                        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-                          <span style={{ fontSize:11, color:"#484f58", width:20 }}>#{i+1}</span>
-                          <span style={{ fontSize:13, fontWeight:700, color:inst.color, width:70 }}>{inst.short}</span>
-                          <div style={{ flex:1, height:6, background:"#21262d", borderRadius:3 }}>
-                            <div style={{ height:"100%", width:`${inst.overall}%`, background:inst.color, borderRadius:3, transition:"width 0.8s" }} />
+                      <div
+                        key={name}
+                        onClick={() => switchIIT(name)}
+                        style={{
+                          cursor: "pointer",
+                          padding: "10px 16px",
+                          borderRadius: "8px",
+                          background: isSelf ? `${inst.color}08` : "rgba(22, 27, 34, 0.4)",
+                          border: `1px solid ${isSelf ? inst.color + "50" : "#21262d"}`,
+                          transition: "all 0.15s",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                          <span style={{ fontSize: "10px", color: "#8b949e", width: "20px", fontFamily: "'IBM Plex Mono', monospace" }}>#{i+1}</span>
+                          <span style={{ fontSize: "12px", fontWeight: 700, color: inst.color, width: "70px", fontFamily: "'IBM Plex Mono', monospace" }}>{inst.short}</span>
+                          <div style={{ flex: 1, height: "4px", background: "#21262d", borderRadius: "2px" }}>
+                            <div style={{ height: "100%", width: `${inst.overall}%`, background: inst.color, borderRadius: "2px" }} />
                           </div>
-                          <span style={{ fontSize:13, fontWeight:800, color:getColor(inst.overall), width:36, textAlign:"right" }}>{inst.overall}</span>
-                          <span style={{ fontSize:9, color:"#484f58", width:70, textAlign:"right" }}>{inst.posts.toLocaleString()} posts</span>
+                          <span style={{ fontSize: "12px", fontWeight: 800, color: getColor(inst.overall), width: "36px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace" }}>{inst.overall}</span>
+                          <span style={{ fontSize: "10px", color: "#8b949e", width: "80px", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace" }}>{inst.posts.toLocaleString()} posts</span>
                         </div>
                       </div>
                     );
@@ -561,38 +792,37 @@ export default function Dashboard() {
 
           {/* ══ CATEGORIES ══ */}
           {tab === "categories" && (
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
               <div style={S.card}>
-                <div style={S.sectionLabel}>RADAR ANALYSIS</div>
+                <div style={S.sectionLabel}>RADAR COMPASS</div>
                 <ResponsiveContainer width="100%" height={260}>
                   <RadarChart data={radarData}>
                     <PolarGrid stroke="#21262d" />
-                    <PolarAngleAxis dataKey="subject" tick={{ fill:"#484f58", fontSize:10 }} />
-                    <Radar name={d.short} dataKey="A" stroke={d.color} fill={d.color} fillOpacity={0.2} strokeWidth={2} />
+                    <PolarAngleAxis dataKey="subject" tick={{ fill: "#8b949e", fontSize: 9, fontFamily: "'IBM Plex Mono', monospace" }} />
+                    <Radar name={d.short} dataKey="A" stroke={d.color} fill={d.color} fillOpacity={0.15} strokeWidth={2} />
                   </RadarChart>
                 </ResponsiveContainer>
               </div>
 
               <div style={S.card}>
                 <div style={S.sectionLabel}>DETAILED BREAKDOWN</div>
-                <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-                  {[...d.categories].sort((a,b) => b.score-a.score).map(cat => (
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                  {[...d.categories].sort((a, b) => b.score - a.score).map(cat => (
                     <div key={cat.name}>
-                      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6 }}>
-                        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
                           <span>{cat.icon}</span>
-                          <span style={{ fontSize:12, color:"#c9d1d9" }}>{cat.name}</span>
+                          <span style={{ fontSize: "11px", color: "#c9d1d9" }}>{cat.name}</span>
                         </div>
-                        <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-                          <span style={{ fontSize:9, color:"#484f58" }}>{cat.posts} posts</span>
-                          <span style={{ fontSize:13, fontWeight:800, color:getColor(cat.score) }}>{cat.score}%</span>
+                        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+                          <span style={{ fontSize: "9px", color: "#8b949e", fontFamily: "'IBM Plex Mono', monospace" }}>{cat.posts} posts</span>
+                          <span style={{ fontSize: "12px", fontWeight: 800, color: getColor(cat.score), fontFamily: "'IBM Plex Mono', monospace" }}>{cat.score}%</span>
                         </div>
                       </div>
-                      <div style={{ height:5, borderRadius:3, background:"#21262d" }}>
+                      <div style={{ height: "4px", borderRadius: "2px", background: "#21262d" }}>
                         <div style={{
-                          height:"100%", width:`${cat.score}%`, borderRadius:3,
-                          background:`linear-gradient(90deg,${getColor(cat.score)},${getColor(cat.score)}bb)`,
-                          transition:"width 0.8s ease",
+                          height: "100%", width: `${cat.score}%`, borderRadius: "2px",
+                          background: getColor(cat.score),
                         }} />
                       </div>
                     </div>
@@ -606,40 +836,51 @@ export default function Dashboard() {
           {tab === "feed" && (
             <div>
               <div style={S.sectionLabel}>REDDIT SIGNAL FEED — {d.sub.toUpperCase()}</div>
-              <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                 {d.topPosts.map((post, i) => {
                   const isPos = post.label === "positive";
                   const isNeg = post.label === "negative";
-                  const bc    = isPos ? "#10b981" : isNeg ? "#ef4444" : "#4b5563";
+                  const bc = isPos ? "#10b981" : isNeg ? "#ef4444" : "#4b5563";
                   return (
-                    <div key={i} style={{
-                      background:"#161b22",
-                      border:`1px solid ${bc}30`,
-                      borderLeft:`4px solid ${bc}`,
-                      borderRadius:10, padding:"16px 18px",
-                    }}>
-                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12 }}>
-                        <div style={{ flex:1 }}>
-                          <div style={{ fontSize:13, color:"#c9d1d9", lineHeight:1.6, marginBottom:8 }}>{post.text}</div>
-                          <div style={{ display:"flex", gap:12, fontSize:10, color:"#484f58" }}>
+                    <div
+                      key={i}
+                      style={{
+                        background: "rgba(22, 27, 34, 0.75)",
+                        border: `1px solid rgba(48, 54, 61, 0.5)`,
+                        borderLeft: `4px solid ${bc}`,
+                        borderRadius: "10px",
+                        padding: "16px 18px",
+                        transition: "background 0.2s"
+                      }}
+                      className="feed-card"
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px" }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: "12px", color: "#c9d1d9", lineHeight: 1.6, marginBottom: "8px" }}>{post.text}</div>
+                          <div style={{ display: "flex", gap: "12px", fontSize: "10px", color: "#8b949e", fontFamily: "'IBM Plex Mono', monospace" }}>
                             <span>📌 r/{post.subreddit}</span>
                             <span>👍 {post.score} upvotes</span>
                             <span>💬 {post.comments} comments</span>
                           </div>
                         </div>
-                        <div style={{ textAlign:"center", flexShrink:0 }}>
+                        <div style={{ textAlign: "center", flexShrink: 0 }}>
                           <div style={{
-                            width:52, height:52, borderRadius:8,
-                            background:`${bc}18`, border:`1px solid ${bc}40`,
-                            display:"flex", flexDirection:"column",
-                            alignItems:"center", justifyContent:"center",
+                            width: "48px",
+                            height: "48px",
+                            borderRadius: "8px",
+                            background: `${bc}08`,
+                            border: `1px solid ${bc}30`,
+                            display: "flex",
+                            flexDirection: "column",
+                            alignItems: "center",
+                            justifyContent: "center",
                           }}>
-                            <div style={{ fontSize:16 }}>{isPos ? "✅" : isNeg ? "⚠️" : "➡️"}</div>
-                            <div style={{ fontSize:10, fontWeight:800, color:bc, marginTop:2 }}>
+                            <div style={{ fontSize: "14px" }}>{isPos ? "✅" : isNeg ? "⚠️" : "➡️"}</div>
+                            <div style={{ fontSize: "9px", fontWeight: 800, color: bc, marginTop: "2px", fontFamily: "'IBM Plex Mono', monospace" }}>
                               {Math.abs(post.compound).toFixed(2)}
                             </div>
                           </div>
-                          <div style={{ fontSize:8, color:"#484f58", marginTop:4, letterSpacing:"0.5px", textTransform:"uppercase" }}>
+                          <div style={{ fontSize: "8px", color: "#8b949e", marginTop: "4px", letterSpacing: "0.5px", textTransform: "uppercase", fontWeight: 700 }}>
                             {post.label}
                           </div>
                         </div>
@@ -650,9 +891,9 @@ export default function Dashboard() {
               </div>
 
               {/* Code snippet */}
-              <div style={{ marginTop:20, background:"#0d1117", border:"1px solid #21262d", borderRadius:10, padding:16 }}>
-                <div style={{ fontSize:10, color:"#484f58", letterSpacing:"2px", marginBottom:10 }}>LIVE PRAW CODE SNIPPET</div>
-                <pre style={{ fontSize:11, color:"#8b949e", lineHeight:1.7, margin:0, overflowX:"auto" }}>
+              <div style={{ marginTop: "20px", background: "#0d1117", border: "1px solid #21262d", borderRadius: "10px", padding: "16px" }}>
+                <div style={{ fontSize: "9px", color: "#8b949e", letterSpacing: "1.5px", marginBottom: "10px", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700 }}>LIVE PRAW TELEMETRY MODULE</div>
+                <pre style={{ fontSize: "11px", color: "#8b949e", lineHeight: 1.7, margin: 0, overflowX: "auto", fontFamily: "'IBM Plex Mono', monospace" }}>
 {`import praw
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
@@ -673,12 +914,20 @@ for post in reddit.subreddit("${d.sub.replace("r/","")}"
       </div>
 
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;700&display=swap');
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: #0d1117; }
-        ::-webkit-scrollbar { width: 4px; height: 4px; }
-        ::-webkit-scrollbar-track { background: #0d1117; }
-        ::-webkit-scrollbar-thumb { background: #21262d; border-radius: 2px; }
+        .sidebar-item:hover {
+          background: rgba(255, 255, 255, 0.02) !important;
+        }
+        .tab-btn:hover:not(.active) {
+          background: rgba(255, 255, 255, 0.03) !important;
+          color: #c9d1d9 !important;
+        }
+        .kpi-card:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        }
+        .feed-card:hover {
+          background: rgba(22, 27, 34, 0.95) !important;
+        }
       `}</style>
     </div>
   );

@@ -9,3 +9,6 @@ apscheduler
 python-dotenv
 torch
 pandas
+mcp-server-reddit
+sentence-transformers
+faiss-cpu
